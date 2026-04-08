@@ -9,32 +9,138 @@ import { BoxPreviewPanel, type PreviewData, type RequestSummary } from "./BoxPre
 
 const AGENT_INSTRUCTIONS = `You are the Box Sign AI Assistant. You help users create and manage e-signature requests in Box.
 
+🚨🚨🚨 READ THIS FIRST - CRITICAL WORKFLOW 🚨🚨🚨
+
+Every signature request creation follows these 4 STEPS IN ORDER:
+1. Extract file ID + participants
+2. Call confirm_security_preferences action ← YOU MUST DO THIS
+3. Call prepare_signature_request (after user responds)
+4. Call create_signature_request (after user confirms)
+
+YOU CANNOT SKIP STEP 2. If you call prepare_signature_request without first calling confirm_security_preferences, you are violating the workflow.
+
+⚠️⚠️⚠️ MANDATORY 4-STEP WORKFLOW - NO SKIPPING ALLOWED ⚠️⚠️⚠️
+
+When a user requests to create a signature request, you MUST follow these 4 steps IN ORDER:
+
+**STEP 1: Extract and Validate**
+- Extract file ID and participants from user's request
+- If missing, ask for them
+- Once you have both, GO TO STEP 2
+
+**STEP 2: Call confirm_security_preferences Action (MANDATORY - CANNOT SKIP)**
+- ⚠️ THIS IS REQUIRED - YOU CANNOT PROCEED TO STEP 3 WITHOUT DOING THIS ⚠️
+- Call the confirm_security_preferences action with:
+  - fileId: the file ID you have
+  - participantEmails: array of all participant emails
+  - requestSummary: brief summary of options (if any)
+- This action returns a message asking the user about security features
+- Display the returned message to the user
+- **STOP HERE** - Do NOT call prepare_signature_request
+- WAIT for the user's response in their next message
+
+**STEP 3: Call prepare_signature_request (ONLY After user responds to security question)**
+- User has now answered the security question
+- Call prepare_signature_request with all parameters
+- Include securityDecision with one of: phone_verification, password_protection, box_login_required, multiple, or none
+- Include any security features they requested
+- Tell user to review and confirm the preview
+
+**STEP 4: Call create_signature_request (After user confirms preview)**
+- User says "yes" or "confirm"
+- Call create_signature_request with the same parameters (including securityDecision)
+
+⚠️ CRITICAL RULE ⚠️
+IF YOU HAVE FILE ID + PARTICIPANTS → YOU MUST CALL confirm_security_preferences BEFORE prepare_signature_request
+DO NOT SKIP STEP 2 UNDER ANY CIRCUMSTANCES
+IF YOU CALL prepare_signature_request WITHOUT FIRST CALLING confirm_security_preferences, YOU ARE DOING IT WRONG
+
 ## Scope: document signing only
 - You must **only** answer questions and perform actions related to **document signing with Box Sign**: searching files in Box, creating signature requests, listing or checking status of sign requests, cancelling or resending requests, and explaining how Box Sign options work (expiration, reminders, signer order, email subject/message).
 - For **any other topic** (weather, news, general knowledge, other products, off-topic chat), do **not** answer or use tools. Reply briefly and redirect: "I can only help with Box Sign—searching documents, creating and managing signature requests. Is there something you'd like to do with a document to sign?" Do not provide information about weather, locations, or anything unrelated to the signing process.
 
-## CRITICAL: Preview and confirm before sending
-- **Always** call **prepare_signature_request** first (with the same parameters you would use for create_signature_request). This shows the user a document preview and request details next to the chat. Tell the user: "I've prepared the request. You can see the document preview and details. Is this the correct document to sign? Reply **Yes** or **Confirm** to send the signature request."
-- **Only after** the user explicitly confirms (e.g. "yes", "confirm", "looks good", "send it", "go ahead") call **create_signature_request** with the same parameters you used in prepare_signature_request. Never call create_signature_request without having first called prepare_signature_request and received user confirmation.
+## CRITICAL: Preview and confirm before sending (STEP 3 and STEP 4)
+- **STEP 3**: Call **prepare_signature_request** (but only AFTER you called confirm_security_preferences in STEP 2). Include securityDecision based on the user's reply (phone_verification, password_protection, box_login_required, multiple, or none). This shows the user a document preview and request details next to the chat. Tell the user: "I've prepared the request. You can see the document preview and details. Is this the correct document to sign? Reply **Yes** or **Confirm** to send the signature request."
+- **STEP 4**: **Only after** the user explicitly confirms (e.g. "yes", "confirm", "looks good", "send it", "go ahead") call **create_signature_request** with the same parameters you used in prepare_signature_request (including securityDecision). Never call create_signature_request without having first called prepare_signature_request and received user confirmation.
 
-## CRITICAL: Required data before preparing/creating
-- Never call prepare_signature_request or create_signature_request until you have **both**: (1) a valid **file ID** (from search_files or explicitly from the user), (2) at least one **real participant email** (signer, approver, or final_copy_reader) that the user stated (never use example@example.com or placeholders—the API rejects them).
-- If the user gives participants + options (expiration, reminders, subject, etc.) but **no document**, reply: "I have the participant(s) and options. Which document should I send for signature? You can give me a file ID or I can search your Box (e.g. by file name)."
-- If the user gives only a file ID and no participants, ask: "Who should be involved? Please provide at least one signer (and optionally approvers or people who should get a copy when done)."
+## Handling user-requested changes to the preview
+- **If the user requests changes** after seeing the preview (e.g., "change expiration to 14 days", "add another signer", "make it sequential", "change email subject"), **immediately call prepare_signature_request again** with the updated parameters.
+- The UI will automatically update to show the new request details.
+- After calling prepare_signature_request with the updated parameters, tell the user: "I've updated the request details. The preview panel now shows [describe the changes]. Please review and confirm if this looks correct."
+- **Important**: Extract and preserve all previous parameters, only modifying what the user requested to change. For example, if they had 2 signers and 7-day expiration, and they ask to "enable reminders", keep the signers and expiration, just add areRemindersEnabled: true.
+- You can call prepare_signature_request multiple times as the user refines their request. Each call updates the preview panel.
+- Only call create_signature_request after the user explicitly confirms the final version.
 
 ## Handling combined / single-message requests
-Users often give many details in one message. **Parse and extract** everything they said, then ask only for what is missing (usually the document or the signer).
+Users often give many details in one message. **Parse and extract** everything they said, then follow the 4-STEP WORKFLOW described at the top.
 
-**Example:** "One signer, alice@company.com, valid for a week, please enable reminder one day before expiration, also add subject '[NDA] Important document from Box'"
-- Extract: participants = [{ email: "alice@company.com", role: "signer" }], daysValid = 7, areRemindersEnabled = true, emailSubject = "[NDA] Important document from Box".
-- **Reminders:** Box Sign uses a fixed cadence (days 3, 8, 13, 18), but only reminders that occur before expiration are relevant. If daysValid is 7, only day 3 applies. Set areRemindersEnabled = true and tell the user the effective reminder days for their expiration window.
-- Document is missing → ask: "Which document should I use? Give me a file ID or I can search Box by name."
+⚠️ CRITICAL REMINDER ⚠️
+After you extract file ID + participants, DO NOT call prepare_signature_request yet.
+Your NEXT ACTION must be: confirm_security_preferences
+This action asks the user about security and returns a message.
+WAIT for user's response, THEN call prepare_signature_request.
 
-**Example:** "Create a sign request for file 123456 with john@company.com and jane@company.com, sequential, expire in 30 days, subject 'Contract to sign'"
-- Extract: fileId = "123456", participants = [{ email: "john@company.com", role: "signer" }, { email: "jane@company.com", role: "signer" }], isSequential = true, daysValid = 30, emailSubject = "Contract to sign". Call create_signature_request with these participants.
+**Example 1 - Simple request:** "One signer, alice@company.com, valid for a week, please enable reminder one day before expiration, also add subject '[NDA] Important document from Box'"
 
-**Example (with approver):** "Send the NDA for signature to alice@co.com, and legal@co.com should approve it; expire in 14 days"
-- Extract: need file (search or ask), participants = [{ email: "alice@co.com", role: "signer" }, { email: "legal@co.com", role: "approver" }], daysValid = 14. Do **not** put legal@co.com as a signer—they are an approver.
+User provides: participants, daysValid, areRemindersEnabled, emailSubject
+Missing: file ID
+
+**Agent Response 1:** "Which document should I use for this signature request? You can give me a file ID or I can search Box by name."
+
+User: "file 123456"
+
+**Agent Response 2 - Call confirm_security_preferences:**
+Call confirm_security_preferences with:
+- fileId: "123456"
+- participantEmails: ["alice@company.com"]
+- requestSummary: "7 days expiration, reminders enabled, custom email subject"
+
+Action returns security question message to user. WAIT for user's response.
+
+User: "No, proceed"
+
+**Agent Response 3 - Call prepare_signature_request:**
+Call prepare_signature_request with: fileId: "123456", participants: [{ email: "alice@company.com", role: "signer" }], daysValid: 7, areRemindersEnabled: true, emailSubject: "[NDA] Important document from Box"
+
+Then say: "Please review and confirm."
+
+**Example 2 - Advanced request showing WORKFLOW:**
+
+User: "Create a sign request for file 123456 with john@company.com and jane@company.com, sequential, expire in 30 days, subject 'Contract to sign'"
+
+**Agent STEP 1 - Extract and validate:**
+- fileId: "123456" ✓
+- participants: john@company.com, jane@company.com ✓  
+- options: isSequential: true, daysValid: 30, emailSubject: "Contract to sign" ✓
+- Proceed to STEP 2
+
+**Agent STEP 2 - Call confirm_security_preferences:**
+Call confirm_security_preferences action with:
+- fileId: "123456"
+- participantEmails: ["john@company.com", "jane@company.com"]
+- requestSummary: "sequential signing, 30 days expiration, custom email subject"
+
+Action returns message to user asking about security. Agent displays this and STOPS.
+
+User: "No thanks, just proceed"
+
+**Agent STEP 3 - Call prepare_signature_request:**
+Call prepare_signature_request with: fileId: "123456", participants: [{ email: "john@company.com", role: "signer" }, { email: "jane@company.com", role: "signer" }], isSequential: true, daysValid: 30, emailSubject: "Contract to sign"
+
+Tell user: "Please review the document and details in the preview panel."
+
+User: "Yes, looks good"
+
+**Agent STEP 4 - Call create_signature_request:**
+Call create_signature_request with same parameters
+
+KEY TAKEAWAY FROM EXAMPLES: Always call confirm_security_preferences action after you have file ID and participants. This action returns the security question to the user. Never skip this step.
+
+**Example 3 - With approver:** "Send the NDA for signature to alice@co.com, and legal@co.com should approve it; expire in 14 days"
+- Extract: participants = [{ email: "alice@co.com", role: "signer" }, { email: "legal@co.com", role: "approver" }], daysValid = 14. Do **not** put legal@co.com as a signer—they are an approver.
+- Missing: file ID → ask for it
+- Once you have file ID, call confirm_security_preferences with the file ID and both participant emails
+- Wait for user's security response, then call prepare_signature_request
 
 ## Box Sign roles (CRITICAL: do not treat approvers as signers)
 Box Sign has three distinct participant roles. **Never** assign someone who is described as an approver or "get a copy" as a signer.
@@ -56,15 +162,27 @@ Box Sign has three distinct participant roles. **Never** assign someone who is d
 - **Email message:** "message body" / "email message" / "custom message in the email" → emailMessage (supports basic HTML).
 - **Signing order:** "sequential" / "in order" / "John first then Sarah" → isSequential: true; put participants in the order they specified.
 - **Request name:** "name this request" / "call it 'Q4 NDA'" → name.
-- At least one participant is required. Prefer **approverEmails/signerEmails/finalCopyReaderEmails** for role-based workflows. Use **participants** only when you need explicit custom ordering.
+- **Phone verification:** "verify by phone for [email]" / "phone verification +1234567890 for alice@co.com" → Add verificationPhoneNumber: "+1234567890" to that participant in participants array. Format must include country code (e.g., "+12125551234"). You MUST use participants array (not approverEmails/signerEmails) when security features are specified.
+- **Password protection:** "require password" / "password 'secret123' for [email]" → Add password: "secret123" to that participant in participants array. The participant will need this password to access the signing request.
+- **Login required:** "require Box login for [email]" / "must be logged in" → Add loginRequired: true to that participant in participants array. The participant must be logged into their Box account to access the request.
+- **Security features are per-participant.** When user requests security, use participants array with objects like: { email: "alice@co.com", role: "signer", verificationPhoneNumber: "+12125551234", password: "secret", loginRequired: true }.
+- **When suggesting security features proactively**: If user hasn't mentioned security, ask: "For added security, I can require phone verification (participant enters a code sent to their phone), password protection (you set a password they need to access the request), or require Box login. Would you like any of these for your participants?"
+- At least one participant is required. Prefer **approverEmails/signerEmails/finalCopyReaderEmails** for simple role-based workflows. Use **participants** array when: (1) custom ordering needed, OR (2) any security features (phone/password/login) specified.
 
-## Two user paths
-1. **Simple:** User gives document + signer(s) only (no expiration, reminders, subject, message, or other options). **Before calling prepare_signature_request**, suggest additional customization options they haven't specified:
-   - "I can create a sign request with those details. Before I prepare it, would you like to customize any of these options?"
-   - List options they haven't mentioned: expiration date (e.g., 7, 14, or 30 days), email reminders, custom email subject or message, additional roles (approvers/final copy recipients), signing order (if multiple signers), or request name.
-   - Ask: "Would you like me to suggest these customization options for future requests, or would you prefer I proceed with defaults unless you specify otherwise?"
-   - If user says they don't want suggestions, note their preference and skip this step in future interactions during this session. If they provide options or say "use defaults" / "proceed", call prepare_signature_request; after they confirm the preview, call create_signature_request.
-2. **Extended / combined:** User gives document + signer(s) + some options in one go. Use everything they said (map via the table above). If only document is missing, ask for document. If only signers are missing, ask for signers. Then call prepare_signature_request; after user confirms, call create_signature_request.
+## IMPORTANT: Email customization limitations
+- **Box Sign sends ONE email subject and ONE email message to ALL participants.** There is no per-participant email customization.
+- If user says "send email subject X to the approver" or "send email Y to the signer", use the LAST mentioned email as the unified subject/message, and explain: "Box Sign will send this email subject/message to all participants: [list all participant emails]. Box Sign doesn't support different emails for different participants."
+- If user requests different subjects/messages for different roles, politely clarify this limitation and ask which one they'd like to use for everyone.
+- The preview panel will show "All X participant(s) will receive this email subject/message" to make this clear.
+
+## Summary of workflow
+
+1. **User provides request** → Extract details, check for missing file/participants
+2. **Call confirm_security_preferences action** → This asks user about security and returns, WAIT for user response
+3. **User answers security question** → Call prepare_signature_request with all parameters (including any security they requested)
+4. **User confirms preview** → Call create_signature_request
+
+CRITICAL: You MUST call confirm_security_preferences before prepare_signature_request. Never skip this step.
 
 ## Bulk operations
 
@@ -98,6 +216,14 @@ For single requests, always include participant roles in the response. Use headi
 - Never invent details from memory. If user asks for request details or status, call **get_signature_request_status** with a request ID (use the most recently created request ID if the user says "this sign request").
 - If user says "return details of this sign request", "details of the request I just created", or "status of this request", prefer **get_latest_signature_request_status** (no parameters) so details always come from the API.
 
+## Understanding the active requests list
+- The "Active signing requests" table shows only requests with these statuses: **converting**, **sent**, **viewed**, or **downloaded** (requests that require action or are in progress).
+- Box API returns ALL historical requests, but we filter to show only those awaiting participant action.
+- Requests with these statuses are NOT shown (filtered out): cancelled, completed, declined, expired, error, signed (fully signed), approved (fully approved), finalizing, created (draft/unsent).
+- If a user asks why they see different requests in the app vs. Box UI: Box API may return requests from all users the token has access to, or old draft requests that were never fully sent. The Box web UI typically shows only requests relevant to that specific user.
+- The list auto-refreshes after creating or cancelling requests. There may be a brief delay (1-2 seconds) for Box API to update.
+- If user reports seeing requests in the app that don't exist in Box UI, these might be: (1) draft requests that were created but never sent, (2) requests from a different Box user the token has access to, or (3) requests in an error state. Suggest they check the browser console logs for request details.
+
 ## When creation fails: explain why and what to do
 If create_signature_request returns an error, **tell the user clearly why the sign request was not created** and what they can do next.
 
@@ -123,9 +249,6 @@ function handleCopilotError(errorEvent: {
       : "Something went wrong.");
   const detail = `${msg}${requestId ? ` (Request ID: ${requestId})` : ""}`;
   console.error("[CopilotKit]", detail, errorEvent);
-  if (typeof window !== "undefined" && window.alert) {
-    window.alert(`Error: ${detail}`);
-  }
 }
 
 /** Single backend for all Box actions. CopilotKit orchestrates; this route runs Box SDK server-side. */
@@ -168,9 +291,18 @@ function chatError(
 ): string {
   const msg = data?.error?.trim() || fallback;
   const userMessage = data?.debug?.userMessage?.trim();
-  if (userMessage) return userMessage;
+  
+  // Prefer userMessage (most user-friendly)
+  if (userMessage) {
+    console.log("[chatError] Using userMessage:", userMessage);
+    return userMessage;
+  }
+  
+  // Fall back to error + hint
   const hint = data?.debug?.hint?.trim();
-  return hint ? `${msg} ${hint}` : msg;
+  const combined = hint ? `${msg} ${hint}` : msg;
+  console.log("[chatError] Using error + hint:", combined);
+  return combined;
 }
 
 function roleLabel(role: string | undefined): string {
@@ -195,15 +327,27 @@ type ActiveSignRequest = {
   createdAt?: string;
 };
 
-const INACTIVE_SIGNATURE_STATUSES = new Set([
-  "cancelled",
-  "declined",
-  "expired",
-  "completed",
+// Box Sign request statuses that ARE considered active and should be shown
+// Box API returns all requests including cancelled/completed ones, so we use a whitelist approach
+// Only show requests that require user attention or are in progress
+// See: https://developer.box.com/reference/resources/sign-request/
+const ACTIVE_SIGNATURE_STATUSES = new Set([
+  "converting",        // Document is being converted
+  "sent",             // Request sent to participants (waiting for action)
+  "viewed",           // Participant viewed the request (waiting for action)
+  "downloaded",       // Participant downloaded the document (waiting for action)
 ]);
 
 function isActiveSignRequestStatus(status?: string): boolean {
-  return !INACTIVE_SIGNATURE_STATUSES.has((status ?? "").toLowerCase());
+  const normalizedStatus = (status ?? "").toLowerCase().trim();
+  const isActive = ACTIVE_SIGNATURE_STATUSES.has(normalizedStatus);
+  
+  // Log for debugging
+  if (!isActive && normalizedStatus) {
+    console.log(`[isActiveSignRequestStatus] Filtering out status: "${normalizedStatus}"`);
+  }
+  
+  return isActive;
 }
 
 type PreviewContextValue = {
@@ -289,7 +433,7 @@ export default function BoxSignAssistant() {
           style={{
             background: "linear-gradient(135deg, #0061D5 0%, #003D8F 100%)",
             borderRadius: "var(--radius-xl)",
-            padding: "var(--space-2xl)",
+            padding: "var(--space-xl)",
             color: "white",
             marginBottom: "var(--space-2xl)",
             boxShadow: "var(--shadow-lg)",
@@ -328,7 +472,7 @@ export default function BoxSignAssistant() {
             border: "var(--border-default)",
             borderRadius: "var(--radius-lg)",
             padding: "var(--space-xl)",
-            marginBottom: "var(--space-xl)",
+            marginBottom: 0,
             boxShadow: "var(--shadow-sm)",
           }}
         >
@@ -502,10 +646,20 @@ export default function BoxSignAssistant() {
         </div>
       </main>
           )}
-          <ActiveSigningRequestsPanel
-            requests={activeSignRequests}
-            loading={activeSignRequestsLoading}
-          />
+          <div
+            style={{
+              maxWidth: "72rem",
+              margin: "0 auto",
+              width: "100%",
+              padding: "0 var(--space-xl)",
+              boxSizing: "border-box",
+            }}
+          >
+            <ActiveSigningRequestsPanel
+              requests={activeSignRequests}
+              loading={activeSignRequestsLoading}
+            />
+          </div>
         </div>
       </PreviewContext.Provider>
     </CopilotKit>
@@ -538,6 +692,135 @@ function QuickAction({
   );
 }
 
+type ParticipantWithSecurity = {
+  email: string;
+  role: string;
+  verificationPhoneNumber?: string;
+  password?: string;
+  loginRequired?: boolean;
+};
+
+type SecurityDecision =
+  | "phone_verification"
+  | "password_protection"
+  | "box_login_required"
+  | "multiple"
+  | "none";
+
+type SecurityGateState = {
+  prompted: boolean;
+  acknowledged: boolean;
+  decision?: SecurityDecision;
+  updatedAt: number;
+};
+
+function buildSecurityGateKey(fileId: string, participants: Array<ParticipantWithSecurity>): string {
+  const normalizedFileId = fileId.trim();
+  const participantKey = participants
+    .map((p) => p.email.trim().toLowerCase())
+    .sort()
+    .join("|");
+  return `${normalizedFileId}::${participantKey}`;
+}
+
+function buildSecurityGateFileKey(fileId: string): string {
+  return `${fileId.trim()}::*`;
+}
+
+function normalizeSecurityDecision(input: unknown): SecurityDecision | null {
+  if (typeof input !== "string") return null;
+  const value = input.trim().toLowerCase();
+  if (!value) return null;
+  if (["phone", "phone_verification", "sms", "verification_phone_number"].includes(value)) {
+    return "phone_verification";
+  }
+  if (["password", "password_protection"].includes(value)) {
+    return "password_protection";
+  }
+  if (["login", "box_login_required", "login_required", "box login"].includes(value)) {
+    return "box_login_required";
+  }
+  if (["multiple", "combination", "mixed"].includes(value)) {
+    return "multiple";
+  }
+  if (["none", "no", "no_security", "proceed_without_security", "skip"].includes(value)) {
+    return "none";
+  }
+  return null;
+}
+
+function applySecurityDecisionFallback(
+  participants: Array<ParticipantWithSecurity>,
+  decision: SecurityDecision
+): Array<ParticipantWithSecurity> {
+  const hasExplicitSecurity = participants.some(
+    (p) => Boolean(p.verificationPhoneNumber || p.password || p.loginRequired)
+  );
+  if (hasExplicitSecurity) return participants;
+
+  // If the user selected login-required but the model forgot to attach
+  // per-participant flags, apply it to signer(s) by default.
+  if (decision === "box_login_required") {
+    const hasSigner = participants.some((p) => (p.role || "").toLowerCase() === "signer");
+    if (hasSigner) {
+      return participants.map((p) =>
+        (p.role || "").toLowerCase() === "signer" ? { ...p, loginRequired: true } : p
+      );
+    }
+    return participants.map((p) => ({ ...p, loginRequired: true }));
+  }
+
+  return participants;
+}
+
+function getMissingSecurityDetailsMessage(
+  participants: Array<ParticipantWithSecurity>,
+  decision: SecurityDecision
+): string | null {
+  const roleName = (role?: string) => {
+    const normalized = (role || "participant").toLowerCase();
+    if (normalized === "signer") return "Signer";
+    if (normalized === "approver") return "Approver";
+    if (normalized === "final_copy_reader") return "Final copy reader";
+    return "Participant";
+  };
+  const formatTargets = (missing: Array<ParticipantWithSecurity>) =>
+    missing.map((p) => `- ${roleName(p.role)}: ${p.email}`).join("\n");
+  const signerEmails = participants
+    .filter((p) => (p.role || "").toLowerCase() === "signer")
+    .map((p) => p.email);
+  const targetEmails = signerEmails.length > 0 ? signerEmails : participants.map((p) => p.email);
+
+  if (decision === "password_protection") {
+    const missing = participants
+      .filter((p) => targetEmails.includes(p.email))
+      .filter((p) => !p.password);
+    if (missing.length > 0) {
+      return `I can add password protection. I still need the password for:\n${formatTargets(missing)}\n\nReply with one message like:\n- "${missing[0].email}: MySecurePass123"\n\nOr provide structured participants with password fields.`;
+    }
+  }
+
+  if (decision === "phone_verification") {
+    const missing = participants
+      .filter((p) => targetEmails.includes(p.email))
+      .filter((p) => !p.verificationPhoneNumber);
+    if (missing.length > 0) {
+      return `I can add phone verification. I still need phone number(s) with country code for:\n${formatTargets(missing)}\n\nReply with one message like:\n- "${missing[0].email}: +12125551234"\n\nOr provide structured participants with verificationPhoneNumber fields.`;
+    }
+  }
+
+  if (decision === "multiple") {
+    const hasAnySecurity = participants.some(
+      (p) => Boolean(p.verificationPhoneNumber || p.password || p.loginRequired)
+    );
+    if (!hasAnySecurity) {
+      return "You selected multiple security features, but I still need the exact per-participant settings. Please provide participants with one or more of: verificationPhoneNumber, password, loginRequired.";
+    }
+  }
+
+  return null;
+}
+
 function buildParticipantsFromParams({
   participantsRaw,
   approverEmailsRaw,
@@ -548,25 +831,25 @@ function buildParticipantsFromParams({
   approverEmailsRaw: unknown;
   signerEmailsRaw: unknown;
   finalCopyReaderEmailsRaw: unknown;
-}): Array<{ email: string; role: string }> {
-  let rawList: Array<{ email?: string; role?: string }> = [];
+}): Array<ParticipantWithSecurity> {
+  let rawList: Array<Record<string, unknown>> = [];
   if (Array.isArray(participantsRaw)) {
-    rawList = participantsRaw as Array<{ email?: string; role?: string }>;
+    rawList = participantsRaw as Array<Record<string, unknown>>;
   } else if (participantsRaw && typeof participantsRaw === "object") {
     const obj = participantsRaw as Record<string, unknown>;
     if (typeof (obj as { email?: string }).email === "string") {
-      rawList = [participantsRaw as { email?: string; role?: string }];
+      rawList = [participantsRaw as Record<string, unknown>];
     } else {
       rawList = Object.keys(obj)
         .filter((k) => /^\d+$/.test(k))
         .sort((a, b) => Number(a) - Number(b))
-        .map((k) => obj[k] as { email?: string; role?: string })
+        .map((k) => obj[k] as Record<string, unknown>)
         .filter((p) => p && typeof p === "object");
     }
   } else if (typeof participantsRaw === "string") {
     try {
       const parsed = JSON.parse(participantsRaw) as unknown;
-      rawList = Array.isArray(parsed) ? (parsed as Array<{ email?: string; role?: string }>) : parsed && typeof parsed === "object" && (parsed as { email?: string }).email ? [parsed as { email?: string; role?: string }] : [];
+      rawList = Array.isArray(parsed) ? (parsed as Array<Record<string, unknown>>) : parsed && typeof parsed === "object" && (parsed as { email?: string }).email ? [parsed as Record<string, unknown>] : [];
     } catch {
       rawList = [];
     }
@@ -574,25 +857,58 @@ function buildParticipantsFromParams({
   const approverEmails = Array.isArray(approverEmailsRaw) ? (approverEmailsRaw as string[]).map((e) => String(e).trim()).filter(Boolean) : approverEmailsRaw != null ? [String(approverEmailsRaw).trim()].filter(Boolean) : [];
   const signerEmails = Array.isArray(signerEmailsRaw) ? (signerEmailsRaw as string[]).map((e) => String(e).trim()).filter(Boolean) : signerEmailsRaw != null ? [String(signerEmailsRaw).trim()].filter(Boolean) : [];
   const finalCopyReaderEmails = Array.isArray(finalCopyReaderEmailsRaw) ? (finalCopyReaderEmailsRaw as string[]).map((e) => String(e).trim()).filter(Boolean) : finalCopyReaderEmailsRaw != null ? [String(finalCopyReaderEmailsRaw).trim()].filter(Boolean) : [];
-  const hasRoleLists = approverEmails.length > 0 || signerEmails.length > 0 || finalCopyReaderEmails.length > 0;
-  if (hasRoleLists) {
-    return [
-      ...approverEmails.map((email) => ({ email, role: "approver" })),
-      ...signerEmails.map((email) => ({ email, role: "signer" })),
-      ...finalCopyReaderEmails.map((email) => ({ email, role: "final_copy_reader" })),
-    ];
-  }
-  const getStr = (p: { email?: string; role?: string }) => (x: string): string =>
-    ((p as Record<string, unknown>)[x] ?? "").toString().trim();
-  return rawList
-    .map((p: { email?: string; role?: string }) => {
+  const getStr = (p: Record<string, unknown>) => (x: string): string =>
+    (p[x] ?? "").toString().trim();
+  const participantsFromRaw = rawList
+    .map((p: Record<string, unknown>) => {
       const g = getStr(p);
       const email = (g("email") || g("Email")).trim();
       if (!email) return null;
       const role = (g("role") || g("Role") || "signer").toLowerCase();
-      return { email, role: ["signer", "approver", "final_copy_reader"].includes(role) ? role : "signer" };
+      const participant: ParticipantWithSecurity = { 
+        email, 
+        role: ["signer", "approver", "final_copy_reader"].includes(role) ? role : "signer" 
+      };
+      
+      // Extract security features if present
+      const phone = g("verificationPhoneNumber") || g("verification_phone_number") || g("phone");
+      if (phone) participant.verificationPhoneNumber = phone;
+      
+      const pwd = g("password");
+      if (pwd) participant.password = pwd;
+      
+      const loginReq = p.loginRequired || p.login_required;
+      if (loginReq === true || loginReq === "true") participant.loginRequired = true;
+      
+      return participant;
     })
-    .filter((p): p is { email: string; role: string } => p != null);
+    .filter((p): p is ParticipantWithSecurity => p != null);
+
+  const hasRoleLists = approverEmails.length > 0 || signerEmails.length > 0 || finalCopyReaderEmails.length > 0;
+  if (!hasRoleLists) {
+    return participantsFromRaw;
+  }
+
+  const byEmail = new Map(
+    participantsFromRaw.map((p) => [p.email.trim().toLowerCase(), p] as const)
+  );
+  const withSecurity = (email: string, role: string): ParticipantWithSecurity => {
+    const base: ParticipantWithSecurity = { email, role };
+    const match = byEmail.get(email.trim().toLowerCase());
+    if (!match) return base;
+    return {
+      ...base,
+      verificationPhoneNumber: match.verificationPhoneNumber,
+      password: match.password,
+      loginRequired: match.loginRequired,
+    };
+  };
+
+  return [
+    ...approverEmails.map((email) => withSecurity(email, "approver")),
+    ...signerEmails.map((email) => withSecurity(email, "signer")),
+    ...finalCopyReaderEmails.map((email) => withSecurity(email, "final_copy_reader")),
+  ];
 }
 
 function ActiveSigningRequestsPanel({
@@ -624,8 +940,9 @@ function ActiveSigningRequestsPanel({
         border: "var(--border-default)",
         borderRadius: "var(--radius-lg)",
         boxShadow: "var(--shadow-sm)",
-        maxWidth: "64rem",
-        width: "calc(100% - 4rem)",
+        maxWidth: "none",
+        width: "100%",
+        boxSizing: "border-box",
       }}
     >
       <h2
@@ -653,7 +970,7 @@ function ActiveSigningRequestsPanel({
       >
         {loading
           ? "Refreshing active requests..."
-          : "This list auto-refreshes after creating a sign request."}
+          : "Showing requests awaiting action (sent, viewed, downloaded, or converting)."}
       </p>
       {loading && !requests.length ? (
         <div
@@ -819,6 +1136,7 @@ function BoxSignActions() {
   const setActiveSignRequestsLoading =
     previewContext?.setActiveSignRequestsLoading ?? (() => {});
   const pendingCreateSignatureRef = useRef<string | null>(null);
+  const securityGateRef = useRef<Map<string, SecurityGateState>>(new Map());
   const lastCreatedSignRequestIdRef = useRef<string | null>(null);
   const signRequestRoleCacheRef = useRef<
     Map<string, Array<{ email: string; role: string; order?: number }>>
@@ -846,7 +1164,12 @@ function BoxSignActions() {
     return byIndex?.role;
   };
 
-  const refreshActiveSignRequests = useCallback(async () => {
+  const refreshActiveSignRequests = useCallback(async (delayMs: number = 0) => {
+    // Add optional delay to allow Box API to propagate status changes
+    if (delayMs > 0) {
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+    
     setActiveSignRequestsLoading(true);
     try {
       const data = await boxAction<{
@@ -859,9 +1182,26 @@ function BoxSignActions() {
           createdAt?: string;
         }>;
       }>("list_signature_requests");
-      if (data.error) return;
+      
+      if (data.error) {
+        console.error("[refreshActiveSignRequests] Error fetching sign requests:", data.error);
+        return;
+      }
 
-      const normalized = (data.signRequests ?? [])
+      const allRequests = data.signRequests ?? [];
+      console.log(`[refreshActiveSignRequests] Received ${allRequests.length} requests from Box API`);
+      
+      // Group requests by status for debugging
+      const statusGroups = allRequests.reduce((acc, req) => {
+        const status = req.status || 'unknown';
+        if (!acc[status]) acc[status] = [];
+        acc[status].push(req.id);
+        return acc;
+      }, {} as Record<string, string[]>);
+      
+      console.log('[refreshActiveSignRequests] Requests by status:', statusGroups);
+
+      const normalized = allRequests
         .map((request) => ({
           ...request,
           signers: (request.signers ?? []).map((signer, index) => ({
@@ -869,13 +1209,38 @@ function BoxSignActions() {
             role: resolveRole(request.id, signer, index),
           })),
         }))
-        .filter((request) => isActiveSignRequestStatus(request.status))
+        .filter((request) => {
+          const isActive = isActiveSignRequestStatus(request.status);
+          if (!isActive) {
+            console.log(`  [FILTERED] ${request.id} (${request.name || 'unnamed'}): status="${request.status}"`);
+          } else {
+            console.log(`  [ACTIVE] ${request.id} (${request.name || 'unnamed'}): status="${request.status}"`);
+          }
+          return isActive;
+        })
         .sort(
           (a, b) =>
             new Date(b.createdAt ?? 0).getTime() - new Date(a.createdAt ?? 0).getTime()
         );
 
+      console.log(`[refreshActiveSignRequests] ✅ Showing ${normalized.length} active request(s) in UI`);
+      console.log(`[refreshActiveSignRequests] 🚫 Filtered out ${allRequests.length - normalized.length} inactive request(s)`);
+      
+      // Additional debug: Show ALL requests with full details
+      console.group('[refreshActiveSignRequests] 📋 ALL REQUESTS FROM BOX API:');
+      allRequests.forEach((req, idx) => {
+        console.log(`${idx + 1}. ID: ${req.id}`);
+        console.log(`   Name: ${req.name || '(unnamed)'}`);
+        console.log(`   Status: "${req.status}"`);
+        console.log(`   Created: ${req.createdAt || 'unknown'}`);
+        console.log(`   Signers: ${req.signers?.map(s => s.email).join(', ') || 'none'}`);
+        console.log(`   ---`);
+      });
+      console.groupEnd();
+      
       setActiveSignRequests(normalized);
+    } catch (error) {
+      console.error("[refreshActiveSignRequests] Exception:", error);
     } finally {
       setActiveSignRequestsLoading(false);
     }
@@ -887,7 +1252,7 @@ function BoxSignActions() {
 
   const buildCreateSignature = (
     params: Record<string, unknown>,
-    participants: Array<{ email: string; role: string }>
+    participants: Array<ParticipantWithSecurity>
   ) =>
     JSON.stringify({
       fileId: String(params.fileId ?? "").trim(),
@@ -906,7 +1271,7 @@ function BoxSignActions() {
 
   const stagePreviewAndDetails = async (
     params: Record<string, unknown>,
-    participants: Array<{ email: string; role: string }>
+    participants: Array<ParticipantWithSecurity>
   ) => {
     const fileId = params.fileId ? String(params.fileId).trim() : "";
     if (!fileId) throw new Error("fileId is required.");
@@ -936,6 +1301,7 @@ function BoxSignActions() {
       areRemindersEnabled: !!params.areRemindersEnabled,
       name: params.name ? String(params.name) : undefined,
       emailSubject: params.emailSubject ? String(params.emailSubject) : undefined,
+      emailMessage: params.emailMessage ? String(params.emailMessage) : undefined,
     };
 
     setPreviewData({
@@ -965,33 +1331,92 @@ function BoxSignActions() {
       const q = String(query ?? "").trim();
       if (!q) throw new Error("Search query is required.");
       const data = await boxAction<{ files?: Array<{ id: string; name?: string; parentId?: string }> }>("search_files", { q });
-      if (data.error) throw new Error(chatError(data, "Search failed."));
+      if (data.error) return chatError(data, "Search failed.");
       const files = data.files ?? [];
       if (!files.length)
         return `No files found for "${query}". Suggest trying a different search or uploading the document to Box first.`;
       return `Found ${files.length} file(s):\n${files
         .map((f) => `- **${f.name || "Unnamed"}** — fileId: \`${f.id}\`${f.parentId ? `, parentFolderId: \`${f.parentId}\`` : ""}`)
-        .join("\n")}\n\nWhen creating a signature request, use the exact fileId (and optionally parentFolderId) from above.`;
+        .join("\n")}\n\nNext step: Call confirm_security_preferences with the fileId and participant emails.`;
+    },
+  });
+
+  useCopilotAction({
+    name: "confirm_security_preferences",
+    description:
+      "🚨 MANDATORY ACTION - CALL THIS FIRST 🚨\n\nThis is STEP 2 of the 4-step workflow. You MUST call this action when you have both file ID and participants, BEFORE calling prepare_signature_request.\n\nWhat this does: Asks the user if they want security features (phone verification, password protection, Box login required).\n\nWhen to call: After you have file ID and participants, before prepare_signature_request.\n\nImportant: This action returns a message. Display it to the user and WAIT for their response. Do NOT call prepare_signature_request in the same message.",
+    parameters: [
+      {
+        name: "fileId",
+        type: "string",
+        description: "The file ID for the signature request",
+        required: true,
+      },
+      {
+        name: "participantEmails",
+        type: "string[]",
+        description: "List of all participant email addresses",
+        required: true,
+      },
+      {
+        name: "requestSummary",
+        type: "string",
+        description: "Brief summary of request options if any (e.g., 'sequential, 30 days expiration, custom subject')",
+        required: false,
+      },
+    ],
+    handler: async ({ fileId, participantEmails, requestSummary }) => {
+      const emails = participantEmails && Array.isArray(participantEmails) ? participantEmails : [];
+      const emailList = emails.length > 0 ? emails.join(", ") : "the participants";
+      const summary = requestSummary ? `\n\nRequest options: ${requestSummary}` : "";
+      const gateKey = buildSecurityGateKey(
+        String(fileId ?? "").trim(),
+        emails
+          .map((email) => String(email ?? "").trim())
+          .filter(Boolean)
+          .map((email) => ({ email, role: "signer" }))
+      );
+      securityGateRef.current.set(gateKey, {
+        prompted: true,
+        acknowledged: false,
+        updatedAt: Date.now(),
+      });
+      securityGateRef.current.set(buildSecurityGateFileKey(String(fileId ?? "").trim()), {
+        prompted: true,
+        acknowledged: false,
+        updatedAt: Date.now(),
+      });
+      
+      console.log('[confirm_security_preferences] Called with:', { fileId, participantEmails, requestSummary });
+      
+      return `I have all the details for your signature request:\n- File ID: ${fileId}\n- Participants: ${emailList}${summary}\n\n**For added security**, I can require:\n• **Phone verification**: Participant enters a code sent to their phone\n• **Password protection**: You set a password they need to access the request\n• **Box login required**: Participant must be logged into their Box account\n\nWould you like any of these security features? You can specify which participant needs what security, or say "no" / "proceed without security" to continue.`;
     },
   });
 
   useCopilotAction({
     name: "prepare_signature_request",
     description:
-      "Prepare a signature request by showing the user a document preview and request details. Call this FIRST before create_signature_request. Use the same parameters (fileId, participants, etc.). After the user confirms in chat (e.g. 'yes' or 'confirm'), call create_signature_request with the same parameters.",
+      "⚠️ THIS IS STEP 3 - DO NOT CALL UNLESS YOU COMPLETED STEP 2 ⚠️\n\nSTEP 2 REQUIREMENT: Before calling this action, you MUST have already called confirm_security_preferences in a PREVIOUS message and received the user's response.\n\nWhat this does: Shows the user a document preview and request details (including security features in a table).\n\nWhen to call: ONLY after you called confirm_security_preferences AND the user responded to the security question.\n\nDO NOT CALL THIS if you haven't called confirm_security_preferences yet. You will skip the mandatory security check.",
     parameters: [
       { name: "fileId", type: "string", description: "Box file ID to be signed", required: true },
       { name: "parentFolderId", type: "string", description: "Box folder ID for signed document. Optional.", required: false },
       { name: "approverEmails", type: "string[]", description: "Emails of approvers.", required: false },
       { name: "signerEmails", type: "string[]", description: "Emails of signers.", required: false },
       { name: "finalCopyReaderEmails", type: "string[]", description: "Emails for final copy.", required: false },
-      { name: "participants", type: "object[]", description: "Array of { email, role }. Optional.", required: false },
+      { name: "participants", type: "object[]", description: "Array of { email, role, verificationPhoneNumber?, password?, loginRequired? }. Use when adding security features per participant.", required: false },
       { name: "isSequential", type: "boolean", description: "Sequential signing order.", required: false },
       { name: "daysValid", type: "number", description: "Days until expiration.", required: false },
       { name: "areRemindersEnabled", type: "boolean", description: "Enable reminders.", required: false },
       { name: "name", type: "string", description: "Request name.", required: false },
       { name: "emailSubject", type: "string", description: "Email subject.", required: false },
       { name: "emailMessage", type: "string", description: "Email message body.", required: false },
+      {
+        name: "securityDecision",
+        type: "string",
+        description:
+          "Human-in-the-loop security decision from the user: phone_verification, password_protection, box_login_required, multiple, or none.",
+        required: false,
+      },
     ],
     handler: async (params) => {
       const participants = buildParticipantsFromParams({
@@ -1000,17 +1425,67 @@ function BoxSignActions() {
         signerEmailsRaw: params.signerEmails,
         finalCopyReaderEmailsRaw: params.finalCopyReaderEmails,
       });
+      
+      // Log security feature usage
+      const hasSecurityFeatures = participants.some(
+        p => p.verificationPhoneNumber || p.password || p.loginRequired
+      );
+      console.log('[prepare_signature_request] Security features present:', hasSecurityFeatures);
+      if (hasSecurityFeatures) {
+        console.log('[prepare_signature_request] Security details:', 
+          participants.map(p => ({
+            email: p.email,
+            phone: !!p.verificationPhoneNumber,
+            password: !!p.password,
+            loginRequired: !!p.loginRequired
+          }))
+        );
+      }
+      
       const fileId = params.fileId ? String(params.fileId).trim() : "";
       if (!fileId) throw new Error("fileId is required.");
       if (!participants.length)
         throw new Error("Specify who is involved: participants or approverEmails/signerEmails.");
+      const gateKey = buildSecurityGateKey(fileId, participants);
+      const fileGateKey = buildSecurityGateFileKey(fileId);
+      const currentGate = securityGateRef.current.get(gateKey) ?? securityGateRef.current.get(fileGateKey);
+      if (!currentGate?.prompted) {
+        return "Before I can prepare this request, I must complete the security checkpoint first. Please confirm whether you want `phone_verification`, `password_protection`, `box_login_required`, `multiple`, or `none`.";
+      }
+      const securityDecision = normalizeSecurityDecision(params.securityDecision);
+      if (!securityDecision) {
+        return "Security confirmation required before preview. Please provide your choice: `phone_verification`, `password_protection`, `box_login_required`, `multiple`, or `none`.";
+      }
+      securityGateRef.current.set(gateKey, {
+        prompted: true,
+        acknowledged: true,
+        decision: securityDecision,
+        updatedAt: Date.now(),
+      });
+      securityGateRef.current.set(fileGateKey, {
+        prompted: true,
+        acknowledged: true,
+        decision: securityDecision,
+        updatedAt: Date.now(),
+      });
+      const participantsWithDecisionFallback = applySecurityDecisionFallback(
+        participants,
+        securityDecision
+      );
+      const missingSecurityDetails = getMissingSecurityDetailsMessage(
+        participantsWithDecisionFallback,
+        securityDecision
+      );
+      if (missingSecurityDetails) {
+        return missingSecurityDetails;
+      }
       const { fileName, requestSummary } = await stagePreviewAndDetails(
         params as Record<string, unknown>,
-        participants
+        participantsWithDecisionFallback
       );
       pendingCreateSignatureRef.current = buildCreateSignature(
         params as Record<string, unknown>,
-        participants
+        participantsWithDecisionFallback
       );
       return `I've prepared the signature request. The document **${fileName}** is shown in the preview panel next to this chat, with the request details below it. Please review and confirm: **Is this the correct document to sign?** Reply **Yes** or **Confirm** to send the signature request; I will then create it with the same parameters (${participants.length} participant(s), ${requestSummary.isSequential ? "sequential signing" : "any order"}${requestSummary.daysValid ? `, expires in ${requestSummary.daysValid} days` : ""}${requestSummary.areRemindersEnabled ? ", reminders enabled" : ""}).`;
     },
@@ -1019,7 +1494,7 @@ function BoxSignActions() {
   useCopilotAction({
     name: "create_signature_request",
     description:
-      "Create a Box Sign signature request. Required: fileId and at least one participant. For workflows with BOTH an approver and a signer: pass approverEmails (array of emails) and signerEmails (array of emails) so roles are correct; set isSequential true. Order is always: approvers first, then signers, then final copy readers. For signers only use signerEmails. Use participants only when you need a custom order with explicit role per person.",
+      "THIS IS STEP 4 - Final step to actually create and send the signature request.\n\nCall this ONLY after: (1) You called confirm_security_preferences, (2) User responded to security question, (3) You called prepare_signature_request, (4) User confirmed the preview.\n\nRequired: fileId and at least one participant. For workflows with BOTH an approver and a signer: pass approverEmails and signerEmails. For security features (phone verification, password, Box login): use participants array with objects containing security properties. Order is always: approvers first, then signers, then final copy readers.",
     parameters: [
       {
         name: "fileId",
@@ -1056,7 +1531,7 @@ function BoxSignActions() {
         name: "participants",
         type: "object[]",
         description:
-          "Alternative: array of { email: string, role: 'signer'|'approver'|'final_copy_reader' }. Use only when not using approverEmails/signerEmails. Order = sequence when isSequential.",
+          "Alternative: array of { email, role, verificationPhoneNumber?, password?, loginRequired? }. Use when adding security features per participant OR custom ordering. Order = sequence when isSequential.",
         required: false,
       },
       {
@@ -1095,6 +1570,13 @@ function BoxSignActions() {
         description: "Custom message body for the sign request email (supports basic HTML). Optional.",
         required: false,
       },
+      {
+        name: "securityDecision",
+        type: "string",
+        description:
+          "Human-in-the-loop security decision already confirmed with the user: phone_verification, password_protection, box_login_required, multiple, or none.",
+        required: false,
+      },
     ],
     handler: async (params) => {
       const participants = buildParticipantsFromParams({
@@ -1123,24 +1605,59 @@ function BoxSignActions() {
         throw new Error(
           "Specify who is involved: use participants (array of { email, role }), or approverEmails and signerEmails, e.g. approverEmails: ['legal@company.com'], signerEmails: ['manager@company.com']."
         );
+      const normalizedFileId = String(fileId).trim();
+      const gateKey = buildSecurityGateKey(normalizedFileId, participants);
+      const fileGateKey = buildSecurityGateFileKey(normalizedFileId);
+      const gate = securityGateRef.current.get(gateKey) ?? securityGateRef.current.get(fileGateKey);
+      const decisionFromParams = normalizeSecurityDecision(params.securityDecision);
+      if (!gate?.prompted) {
+        return "I can't send this request yet because the mandatory security checkpoint has not been completed. Please confirm whether you want phone verification, password protection, Box login required, or none.";
+      }
+      if (!gate.acknowledged && !decisionFromParams) {
+        return "Before I can send this, I still need your explicit security decision: `phone_verification`, `password_protection`, `box_login_required`, `multiple`, or `none`.";
+      }
+      const effectiveDecision = decisionFromParams ?? gate.decision ?? "none";
+      securityGateRef.current.set(gateKey, {
+        prompted: true,
+        acknowledged: true,
+        decision: effectiveDecision,
+        updatedAt: Date.now(),
+      });
+      securityGateRef.current.set(fileGateKey, {
+        prompted: true,
+        acknowledged: true,
+        decision: effectiveDecision,
+        updatedAt: Date.now(),
+      });
+      const participantsWithDecisionFallback = applySecurityDecisionFallback(
+        participants,
+        effectiveDecision
+      );
+      const missingSecurityDetails = getMissingSecurityDetailsMessage(
+        participantsWithDecisionFallback,
+        effectiveDecision
+      );
+      if (missingSecurityDetails) {
+        return missingSecurityDetails;
+      }
 
       const currentSignature = buildCreateSignature(
         params as Record<string, unknown>,
-        participants
+        participantsWithDecisionFallback
       );
       if (pendingCreateSignatureRef.current !== currentSignature) {
         const { fileName, requestSummary } = await stagePreviewAndDetails(
           params as Record<string, unknown>,
-          participants
+          participantsWithDecisionFallback
         );
         pendingCreateSignatureRef.current = currentSignature;
-        return `Before sending, I must show the document preview and signing details. I have displayed **${fileName}** with all request details on screen. Please review and confirm in chat ("Yes" or "Confirm"), then ask me to send this exact request. Details: ${participants.length} participant(s), ${requestSummary.isSequential ? "sequential signing" : "any order"}${requestSummary.daysValid ? `, expires in ${requestSummary.daysValid} days` : ""}${requestSummary.areRemindersEnabled ? ", reminders enabled" : ""}.`;
+        return `Before sending, I must show the document preview and signing details. I have displayed **${fileName}** with all request details on screen. Please review and confirm in chat ("Yes" or "Confirm"), then ask me to send this exact request. Details: ${participantsWithDecisionFallback.length} participant(s), ${requestSummary.isSequential ? "sequential signing" : "any order"}${requestSummary.daysValid ? `, expires in ${requestSummary.daysValid} days` : ""}${requestSummary.areRemindersEnabled ? ", reminders enabled" : ""}.`;
       }
 
       const payload: Record<string, unknown> = {
         fileId: String(fileId),
         parentFolderId: parentFolderId != null && String(parentFolderId).trim() ? String(parentFolderId).trim() : undefined,
-        participants,
+        participants: participantsWithDecisionFallback,
         isSequential: !!isSequential,
         daysValid,
         areRemindersEnabled: !!areRemindersEnabled,
@@ -1162,18 +1679,21 @@ function BoxSignActions() {
         };
       }>("create_signature_request", payload);
       if (data.error) {
-        const message = chatError(data, "Create failed.");
-        throw new Error(message);
+        const message = chatError(data, "Failed to create signature request.");
+        console.error("[create_signature_request] Error:", message, data);
+        return message;
       }
       const sr = data.signRequest;
       if (sr?.id) {
         lastCreatedSignRequestIdRef.current = sr.id;
         signRequestRoleCacheRef.current.set(
           sr.id,
-          participants.map((p, index) => ({ email: p.email, role: p.role, order: !!isSequential ? index : undefined }))
+          participantsWithDecisionFallback.map((p, index) => ({ email: p.email, role: p.role, order: !!isSequential ? index : undefined }))
         );
       }
       pendingCreateSignatureRef.current = null;
+      securityGateRef.current.delete(gateKey);
+      securityGateRef.current.delete(fileGateKey);
       setPreviewData(null);
       await refreshActiveSignRequests();
       const participantLines =
@@ -1472,7 +1992,7 @@ function BoxSignActions() {
           createdAt?: string;
         }>;
       }>("list_signature_requests");
-      if (data.error) throw new Error(chatError(data, "List failed."));
+      if (data.error) return chatError(data, "List failed.");
       const list = data.signRequests ?? [];
       const activeList = list.filter((request) =>
         isActiveSignRequestStatus(request.status)
@@ -1524,7 +2044,7 @@ function BoxSignActions() {
         const listData = await boxAction<{
           signRequests?: Array<{ id: string }>;
         }>("list_signature_requests");
-        if (listData.error) throw new Error(chatError(listData, "List failed."));
+        if (listData.error) return chatError(listData, "List failed.");
         resolvedSignRequestId = listData.signRequests?.[0]?.id ?? null;
       }
       if (!resolvedSignRequestId) {
@@ -1538,7 +2058,7 @@ function BoxSignActions() {
         autoExpireAt?: string;
         prepareUrl?: string;
       }>("get_signature_request_status", { signRequestId: resolvedSignRequestId });
-      if (r.error) throw new Error(chatError(r, "Get failed."));
+      if (r.error) return chatError(r, "Get failed.");
       if (r.id) {
         lastCreatedSignRequestIdRef.current = r.id;
       }
@@ -1561,7 +2081,7 @@ function BoxSignActions() {
         const listData = await boxAction<{
           signRequests?: Array<{ id: string }>;
         }>("list_signature_requests");
-        if (listData.error) throw new Error(chatError(listData, "List failed."));
+        if (listData.error) return chatError(listData, "List failed.");
         resolvedSignRequestId = listData.signRequests?.[0]?.id ?? null;
       }
       if (!resolvedSignRequestId) {
@@ -1575,7 +2095,7 @@ function BoxSignActions() {
         autoExpireAt?: string;
         prepareUrl?: string;
       }>("get_signature_request_status", { signRequestId: resolvedSignRequestId });
-      if (r.error) throw new Error(chatError(r, "Get failed."));
+      if (r.error) return chatError(r, "Get failed.");
       if (r.id) {
         lastCreatedSignRequestIdRef.current = r.id;
       }
@@ -1611,7 +2131,7 @@ function BoxSignActions() {
           status: string;
         }>;
       }>("list_signature_requests");
-      if (listData.error) throw new Error(chatError(listData, "List failed."));
+      if (listData.error) return chatError(listData, "List failed.");
 
       const all = listData.signRequests ?? [];
       const matches = all.filter((request) => {
@@ -1629,6 +2149,11 @@ function BoxSignActions() {
       );
       const skipped = matches.filter((request) => !isActiveSignRequestStatus(request.status));
 
+      // Optimistically remove matching requests from UI immediately
+      const currentRequests = previewContext?.activeSignRequests ?? [];
+      const idsToCancel = activeMatches.map(r => r.id);
+      setActiveSignRequests(currentRequests.filter(r => !idsToCancel.includes(r.id)));
+      
       let cancelled = 0;
       const cancelledIds: string[] = [];
       const failed: Array<{ id: string; error: string }> = [];
@@ -1644,6 +2169,7 @@ function BoxSignActions() {
         }
       }
 
+      // Refresh from server to ensure consistency
       await refreshActiveSignRequests();
 
       const cancelledLines = activeMatches
@@ -1684,8 +2210,19 @@ function BoxSignActions() {
     ],
     handler: async ({ signRequestId }) => {
       if (!signRequestId) throw new Error("signRequestId is required.");
+      
+      // Optimistically remove from UI immediately
+      const currentRequests = previewContext?.activeSignRequests ?? [];
+      setActiveSignRequests(currentRequests.filter(r => r.id !== signRequestId));
+      
       const data = await boxAction("cancel_signature_request", { signRequestId: String(signRequestId) });
-      if (data.error) throw new Error(chatError(data, "Cancel failed."));
+      if (data.error) {
+        // Restore on error
+        setActiveSignRequests(currentRequests);
+        return chatError(data, "Cancel failed.");
+      }
+      
+      // Refresh from server to ensure consistency
       await refreshActiveSignRequests();
       return `Signature request \`${signRequestId}\` has been cancelled.`;
     },
@@ -1706,7 +2243,7 @@ function BoxSignActions() {
     handler: async ({ signRequestId }) => {
       if (!signRequestId) throw new Error("signRequestId is required.");
       const data = await boxAction("resend_signature_request", { signRequestId: String(signRequestId) });
-      if (data.error) throw new Error(chatError(data, "Resend failed."));
+      if (data.error) return chatError(data, "Resend failed.");
       return `Signature request \`${signRequestId}\` emails have been resent to outstanding signers.`;
     },
   });

@@ -21,12 +21,19 @@ declare global {
 export type RequestSummary = {
   fileId: string;
   fileName: string;
-  participants: Array<{ email: string; role: string }>;
+  participants: Array<{ 
+    email: string; 
+    role: string;
+    verificationPhoneNumber?: string;
+    password?: string;
+    loginRequired?: boolean;
+  }>;
   isSequential?: boolean;
   daysValid?: number;
   areRemindersEnabled?: boolean;
   name?: string;
   emailSubject?: string;
+  emailMessage?: string;
 };
 
 export type PreviewData = {
@@ -178,6 +185,9 @@ export function BoxPreviewPanel({
 
   const { fileName, requestSummary } = currentDoc;
   const effectiveReminderDays = getEffectiveReminderDays(requestSummary.daysValid);
+  const hasAnySecurityFeature = requestSummary.participants.some(
+    (p) => Boolean(p.verificationPhoneNumber || p.password || p.loginRequired)
+  );
   const reminderLabel =
     effectiveReminderDays.length > 0
       ? `Reminders: enabled (days ${effectiveReminderDays.join(", ")})`
@@ -200,7 +210,7 @@ export function BoxPreviewPanel({
     >
       <div
         style={{
-          padding: "var(--space-lg) var(--space-xl)",
+          padding: "var(--space-md)",
           borderBottom: "var(--border-default)",
           background: "linear-gradient(135deg, #0061D5 0%, #003D8F 100%)",
           color: "white",
@@ -343,31 +353,89 @@ export function BoxPreviewPanel({
           lineHeight: 1.6, 
           color: "#334155" 
         }}>
-          {requestSummary.participants.map((p, i) => (
-            <div key={i} style={{ display: "flex", alignItems: "baseline", gap: "0.75rem" }}>
-              <span style={{ 
-                fontWeight: 600, 
-                minWidth: "130px",
-                color: "#0061D5",
-                fontSize: "0.9375rem" 
-              }}>
-                {roleLabel(p.role)}:
-              </span>
-              <span style={{ fontSize: "0.9375rem", color: "#1E293B", fontWeight: 500 }}>{p.email}</span>
-            </div>
-          ))}
+          {/* Participants Table */}
+          <div style={{ 
+            border: "1px solid #e2e8f0", 
+            borderRadius: "var(--radius-md)", 
+            overflow: "hidden",
+            background: "#fafbfc"
+          }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.875rem" }}>
+              <thead style={{ background: "#f1f5f9" }}>
+                <tr>
+                  <th style={{ padding: "0.75rem", textAlign: "left", fontWeight: 600, color: "#475569", borderBottom: "1px solid #e2e8f0" }}>
+                    {requestSummary.isSequential ? "Order" : ""}
+                  </th>
+                  <th style={{ padding: "0.75rem", textAlign: "left", fontWeight: 600, color: "#475569", borderBottom: "1px solid #e2e8f0" }}>
+                    Role
+                  </th>
+                  <th style={{ padding: "0.75rem", textAlign: "left", fontWeight: 600, color: "#475569", borderBottom: "1px solid #e2e8f0" }}>
+                    Email
+                  </th>
+                  <th style={{ padding: "0.75rem", textAlign: "left", fontWeight: 600, color: "#475569", borderBottom: "1px solid #e2e8f0" }}>
+                    Security
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {requestSummary.participants.map((p, i) => {
+                  const securityFeatures = [];
+                  if (p.verificationPhoneNumber) securityFeatures.push(`📱 Phone: ${p.verificationPhoneNumber}`);
+                  if (p.password) securityFeatures.push("🔒 Password");
+                  if (p.loginRequired) securityFeatures.push("👤 Login required");
+                  
+                  return (
+                    <tr key={i} style={{ borderBottom: i < requestSummary.participants.length - 1 ? "1px solid #e2e8f0" : "none" }}>
+                      <td style={{ padding: "0.75rem", color: "#64748b", fontWeight: 500 }}>
+                        {requestSummary.isSequential ? `${i + 1}` : ""}
+                      </td>
+                      <td style={{ padding: "0.75rem", fontWeight: 600, color: "#0061D5" }}>
+                        {roleLabel(p.role)}
+                      </td>
+                      <td style={{ padding: "0.75rem", color: "#1E293B", fontWeight: 500 }}>
+                        {p.email}
+                      </td>
+                      <td style={{ padding: "0.75rem", color: "#64748b", fontSize: "0.8125rem" }}>
+                        {securityFeatures.length > 0 ? (
+                          <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+                            {securityFeatures.map((feature, idx) => (
+                              <div key={idx}>{feature}</div>
+                            ))}
+                          </div>
+                        ) : (
+                          <span style={{ fontStyle: "italic", opacity: 0.6 }}>None</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          
           {requestSummary.isSequential && (
             <div style={{ display: "flex", alignItems: "baseline", gap: "0.75rem" }}>
               <span style={{ fontWeight: 600, minWidth: "130px", fontSize: "0.9375rem", color: "#475569" }}>Signing order:</span>
               <span style={{ fontSize: "0.9375rem", color: "#1E293B", fontWeight: 500 }}>Sequential</span>
             </div>
           )}
-          {requestSummary.daysValid != null && requestSummary.daysValid > 0 && (
-            <div style={{ display: "flex", alignItems: "baseline", gap: "0.75rem" }}>
-              <span style={{ fontWeight: 600, minWidth: "130px", fontSize: "0.9375rem", color: "#475569" }}>Expires in:</span>
-              <span style={{ fontSize: "0.9375rem", color: "#1E293B", fontWeight: 500 }}>{requestSummary.daysValid} days</span>
-            </div>
-          )}
+          {requestSummary.daysValid != null && requestSummary.daysValid > 0 && (() => {
+            const expirationDate = new Date();
+            expirationDate.setDate(expirationDate.getDate() + requestSummary.daysValid);
+            const formattedDate = expirationDate.toLocaleDateString('en-US', { 
+              month: 'short', 
+              day: 'numeric', 
+              year: 'numeric' 
+            });
+            return (
+              <div style={{ display: "flex", alignItems: "baseline", gap: "0.75rem" }}>
+                <span style={{ fontWeight: 600, minWidth: "130px", fontSize: "0.9375rem", color: "#475569" }}>Expires in:</span>
+                <span style={{ fontSize: "0.9375rem", color: "#1E293B", fontWeight: 500 }}>
+                  {requestSummary.daysValid} day{requestSummary.daysValid !== 1 ? 's' : ''} ({formattedDate})
+                </span>
+              </div>
+            );
+          })()}
           {requestSummary.areRemindersEnabled && (
             <div style={{ display: "flex", alignItems: "baseline", gap: "0.75rem" }}>
               <span style={{ fontWeight: 600, minWidth: "130px", fontSize: "0.9375rem", color: "#475569" }}>Reminders:</span>
@@ -383,9 +451,40 @@ export function BoxPreviewPanel({
             </div>
           )}
           {requestSummary.emailSubject && (
-            <div style={{ display: "flex", alignItems: "baseline", gap: "0.75rem" }}>
-              <span style={{ fontWeight: 600, minWidth: "130px", fontSize: "0.9375rem", color: "#475569" }}>Email subject:</span>
-              <span style={{ fontSize: "0.9375rem", color: "#1E293B", fontWeight: 500 }}>{requestSummary.emailSubject}</span>
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+              <div style={{ display: "flex", alignItems: "baseline", gap: "0.75rem" }}>
+                <span style={{ fontWeight: 600, minWidth: "130px", fontSize: "0.9375rem", color: "#475569" }}>Email subject:</span>
+                <span style={{ fontSize: "0.9375rem", color: "#1E293B", fontWeight: 500, flex: 1 }}>{requestSummary.emailSubject}</span>
+              </div>
+              <div style={{ fontSize: "0.8125rem", color: "#64748b", fontStyle: "italic", paddingLeft: "138px" }}>
+                All {requestSummary.participants.length} participant(s) will receive this email subject
+              </div>
+            </div>
+          )}
+          {requestSummary.emailMessage && (
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+              <div style={{ display: "flex", alignItems: "flex-start", gap: "0.75rem" }}>
+                <span style={{ fontWeight: 600, minWidth: "130px", fontSize: "0.9375rem", color: "#475569", paddingTop: "0.125rem" }}>Email message:</span>
+                <div style={{ 
+                  fontSize: "0.9375rem", 
+                  color: "#1E293B", 
+                  fontWeight: 500, 
+                  flex: 1,
+                  maxHeight: "150px",
+                  overflowY: "auto",
+                  padding: "0.5rem",
+                  background: "#f8fafc",
+                  borderRadius: "var(--radius-sm)",
+                  border: "1px solid #e2e8f0",
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-word"
+                }}>
+                  {requestSummary.emailMessage}
+                </div>
+              </div>
+              <div style={{ fontSize: "0.8125rem", color: "#64748b", fontStyle: "italic", paddingLeft: "138px" }}>
+                All {requestSummary.participants.length} participant(s) will receive this email message
+              </div>
             </div>
           )}
         </div>
@@ -413,6 +512,23 @@ export function BoxPreviewPanel({
           <strong style={{ color: "#0061D5", fontWeight: 700 }}>Confirm</strong>
           <span style={{ color: "#334155" }}> in the chat to send the signature request{totalDocs > 1 ? "s" : ""}.</span>
         </div>
+        {!hasAnySecurityFeature ? (
+          <div
+            style={{
+              marginTop: "1rem",
+              padding: "1rem 1.25rem",
+              borderRadius: "var(--radius-lg)",
+              border: "1px solid rgba(245, 158, 11, 0.45)",
+              background: "rgba(245, 158, 11, 0.12)",
+              color: "#78350F",
+              fontSize: "0.875rem",
+              lineHeight: 1.6,
+              fontWeight: 500,
+            }}
+          >
+            Security reminder: no participant security is currently enabled. Consider adding phone verification, password protection, or Box login requirement before sending.
+          </div>
+        ) : null}
       </div>
       <div
         id={containerId}
@@ -439,9 +555,9 @@ export function BoxPreviewPanel({
           }}
         >
           <a
-            href={currentDoc.embedUrl || `https://app.box.com/file/${currentDoc.fileId}`}
+            href={`https://app.box.com/file/${currentDoc.fileId}`}
             target="_blank"
-            rel="noreferrer"
+            rel="noopener noreferrer"
             style={{
               fontSize: "0.875rem",
               fontWeight: 500,

@@ -61,6 +61,22 @@ function resolveRole(
   return undefined;
 }
 
+function getFriendlyUserMessage(status: number, message: string): string {
+  if (message.includes("BOX_DEVELOPER_TOKEN")) {
+    return "The Box connection is not configured. Please contact the administrator to set up Box credentials.";
+  }
+  if (status === 404) {
+    return "The requested item was not found in Box. Please check the file ID or search for the file again.";
+  }
+  if (status === 401 || status === 403) {
+    return "Access denied. Please check your Box permissions or refresh your credentials.";
+  }
+  if (status >= 500) {
+    return "Box is experiencing issues. Please try again in a moment.";
+  }
+  return "There was an error with your request. Please try again or rephrase your request.";
+}
+
 export async function POST(request: NextRequest) {
   let body: { action?: BoxAction; [key: string]: unknown };
   try {
@@ -77,6 +93,9 @@ export async function POST(request: NextRequest) {
       {
         error:
           "Body must include action: search_files | get_file_preview_info | create_signature_request | list_signature_requests | get_signature_request_status | cancel_signature_request | resend_signature_request",
+        debug: {
+          userMessage: "There was an error processing your request. Please try again or rephrase what you'd like to do."
+        }
       },
       { status: 400 }
     );
@@ -88,7 +107,12 @@ export async function POST(request: NextRequest) {
         const q = (body.q ?? body.query ?? "").toString().trim();
         if (!q) {
           return NextResponse.json(
-            { error: "Search requires q or query." },
+            { 
+              error: "Search requires a query parameter.",
+              debug: {
+                userMessage: "Please provide a file name or search term so I can find the document in Box."
+              }
+            },
             { status: 400 }
           );
         }
@@ -122,7 +146,12 @@ export async function POST(request: NextRequest) {
         const fileId = body.fileId?.toString()?.trim();
         if (!fileId) {
           return NextResponse.json(
-            { error: "fileId is required for get_file_preview_info." },
+            { 
+              error: "fileId is required for get_file_preview_info.",
+              debug: {
+                userMessage: "I need a file ID to show the preview. Please provide a file ID or let me search Box for the document."
+              }
+            },
             { status: 400 }
           );
         }
@@ -136,7 +165,12 @@ export async function POST(request: NextRequest) {
           const token = process.env.BOX_DEVELOPER_TOKEN;
           if (!token) {
             return NextResponse.json(
-              { error: "BOX_DEVELOPER_TOKEN is not set." },
+              {
+                error: "BOX_DEVELOPER_TOKEN is not set.",
+                debug: {
+                  userMessage: getFriendlyUserMessage(500, "BOX_DEVELOPER_TOKEN is not set."),
+                },
+              },
               { status: 500 }
             );
           }
@@ -148,38 +182,56 @@ export async function POST(request: NextRequest) {
           });
         } catch (fileErr: unknown) {
           const { status, message } = normalizeBoxError(fileErr);
+          const responseStatus = status === 404 ? 404 : 500;
           return NextResponse.json(
             {
               error:
                 status === 404
                   ? `File not found (ID: ${fileId}).`
                   : message,
+              debug: {
+                userMessage: getFriendlyUserMessage(responseStatus, message),
+              },
             },
-            { status: status === 404 ? 404 : 500 }
+            { status: responseStatus }
           );
         }
       }
 
       case "list_signature_requests": {
         const client = getBoxClient();
-        const result = await client.signRequests.getSignRequests({ limit: 25 });
-        const entries = Array.from(result.entries ?? []).map((req) => ({
-          id: req.id,
-          status: req.status,
-          name: req.name,
-          createdAt: req.createdAt,
-          signers: req.signers?.map((s) => ({
-            email: s.email,
-            role: resolveRole(req.id, s as { email?: string; order?: number; role?: string; rawData?: Record<string, unknown> }),
-            order: s.order,
-            status: (s as { signerDecision?: { type?: string } }).signerDecision?.type ?? "pending",
-          })),
-          sourceFileId: req.sourceFiles?.[0]?.id,
-          parentFolder: req.parentFolder,
-          daysValid: req.daysValid,
-          areRemindersEnabled: req.areRemindersEnabled,
-          autoExpireAt: req.autoExpireAt,
-        }));
+        const result = await client.signRequests.getSignRequests({ limit: 100 });
+        const entries = Array.from(result.entries ?? []).map((req) => {
+          // Debug logging
+          console.log(`[list_signature_requests] Request ${req.id}: status=${req.status}, name=${req.name}`);
+          
+          return {
+            id: req.id,
+            status: req.status,
+            name: req.name,
+            createdAt: req.createdAt,
+            signers: req.signers?.map((s) => ({
+              email: s.email,
+              role: resolveRole(req.id, s as { email?: string; order?: number; role?: string; rawData?: Record<string, unknown> }),
+              order: s.order,
+              status: (s as { signerDecision?: { type?: string } }).signerDecision?.type ?? "pending",
+            })),
+            sourceFileId: req.sourceFiles?.[0]?.id,
+            parentFolder: req.parentFolder,
+            daysValid: req.daysValid,
+            areRemindersEnabled: req.areRemindersEnabled,
+            autoExpireAt: req.autoExpireAt,
+          };
+        });
+        
+        console.log(`[list_signature_requests] Total returned from Box API: ${entries.length}`);
+        console.log(`[list_signature_requests] Status breakdown:`, 
+          entries.reduce((acc, e) => {
+            acc[e.status || 'unknown'] = (acc[e.status || 'unknown'] || 0) + 1;
+            return acc;
+          }, {} as Record<string, number>)
+        );
+        
         return NextResponse.json({ signRequests: entries });
       }
 
@@ -187,7 +239,12 @@ export async function POST(request: NextRequest) {
         const id = (body.signRequestId ?? body.id)?.toString()?.trim();
         if (!id) {
           return NextResponse.json(
-            { error: "signRequestId is required." },
+            { 
+              error: "signRequestId is required.",
+              debug: {
+                userMessage: "I need a signature request ID to check status. Please provide the request ID or let me list your requests."
+              }
+            },
             { status: 400 }
           );
         }
@@ -220,7 +277,12 @@ export async function POST(request: NextRequest) {
         const id = (body.signRequestId ?? body.id)?.toString()?.trim();
         if (!id) {
           return NextResponse.json(
-            { error: "signRequestId is required." },
+            { 
+              error: "signRequestId is required.",
+              debug: {
+                userMessage: "I need a signature request ID to cancel. Please provide the request ID or let me list your requests."
+              }
+            },
             { status: 400 }
           );
         }
@@ -233,7 +295,12 @@ export async function POST(request: NextRequest) {
         const id = (body.signRequestId ?? body.id)?.toString()?.trim();
         if (!id) {
           return NextResponse.json(
-            { error: "signRequestId is required." },
+            { 
+              error: "signRequestId is required.",
+              debug: {
+                userMessage: "I need a signature request ID to resend. Please provide the request ID or let me list your requests."
+              }
+            },
             { status: 400 }
           );
         }
@@ -315,8 +382,11 @@ export async function POST(request: NextRequest) {
         if (!fileId || !participants.length) {
           return NextResponse.json(
             {
-              error: "fileId and participants are required. Pass participants (array of { email, role }), or approverEmails and signerEmails.",
+              error: "fileId and participants are required.",
               debug: {
+                userMessage: !fileId 
+                  ? "I need a file ID to create the signature request. Please provide a file ID or let me search Box for the document."
+                  : "I need at least one participant (signer, approver, or final copy reader). Please provide email addresses for who should be involved.",
                 hint: "E.g. approverEmails: ['a@b.com'], signerEmails: ['c@d.com'] or participants: [{ email: 'a@b.com', role: 'approver' }, { email: 'c@d.com', role: 'signer' }].",
               },
             },
@@ -333,8 +403,11 @@ export async function POST(request: NextRequest) {
         if (invalidEmails.length > 0) {
           return NextResponse.json(
             {
-              error: "Please use real email addresses. Placeholder emails (e.g. example@example.com) are not allowed.",
-              debug: { hint: "Ask the user to provide actual participant email(s).", invalid: invalidEmails },
+              error: `Please use real email addresses. Placeholder emails are not allowed: ${invalidEmails.join(", ")}`,
+              debug: { 
+                userMessage: `The signature request wasn't created because placeholder emails are not allowed. Please provide real email addresses instead of: ${invalidEmails.join(", ")}`,
+                invalid: invalidEmails 
+              },
             },
             { status: 400 }
           );
@@ -353,16 +426,18 @@ export async function POST(request: NextRequest) {
               status === 404
                 ? `File not found (ID: ${fileId}). Use only file IDs from search_files; BOX_DEVELOPER_TOKEN must be for the Box user who owns the file.`
                 : message;
+            const userMessage = getFriendlyUserMessage(status, message);
             return NextResponse.json(
               {
                 error,
-                ...(status === 404 && {
-                  debug: {
+                debug: {
+                  userMessage,
+                  ...(status === 404 && {
                     fileId,
                     requestId,
                     source: "get_file_by_id" as const,
-                  },
-                }),
+                  }),
+                },
               },
               { status }
             );
@@ -385,11 +460,32 @@ export async function POST(request: NextRequest) {
         }
 
         const signers: SignRequestCreateSigner[] = participants.map(
-          (p: { email: string; role: ParticipantRole }, index: number) => ({
-            email: p.email.trim(),
-            role: p.role,
-            order: isSequential ? index : undefined,
-          })
+          (p: { 
+            email: string; 
+            role: ParticipantRole;
+            verificationPhoneNumber?: string;
+            password?: string;
+            loginRequired?: boolean;
+          }, index: number) => {
+            const signer: SignRequestCreateSigner = {
+              email: p.email.trim(),
+              role: p.role,
+              order: isSequential ? index : undefined,
+            };
+            
+            // Add security features if present
+            if (p.verificationPhoneNumber) {
+              signer.verificationPhoneNumber = p.verificationPhoneNumber;
+            }
+            if (p.password) {
+              signer.password = p.password;
+            }
+            if (p.loginRequired) {
+              signer.loginRequired = true;
+            }
+            
+            return signer;
+          }
         );
 
         const signRequest = await client.signRequests.createSignRequest({
@@ -444,14 +540,18 @@ export async function POST(request: NextRequest) {
     }
   } catch (err: unknown) {
     const { status, message, requestId } = normalizeBoxError(err);
+    
+    const userMessage = getFriendlyUserMessage(status, message);
+    
     const debug =
       process.env.NODE_ENV === "development" || status === 404
         ? {
             requestId,
+            userMessage,
             hint:
               status === 404 ? "Use file IDs from search_files." : undefined,
           }
-        : undefined;
+        : { userMessage };
     return NextResponse.json(
       { error: message, ...(debug && { debug }) },
       { status }
