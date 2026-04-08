@@ -930,6 +930,13 @@ function ActiveSigningRequestsPanel({
     if (Number.isNaN(date.getTime())) return "—";
     return date.toLocaleString();
   };
+  const hasValidDate = (value?: string) => {
+    if (!value) return false;
+    const date = new Date(value);
+    return !Number.isNaN(date.getTime());
+  };
+  const showExpiresColumn = requests.some((request) => hasValidDate(request.autoExpireAt));
+  const showCreatedColumn = requests.some((request) => hasValidDate(request.createdAt));
 
   return (
     <section
@@ -1054,8 +1061,12 @@ function ActiveSigningRequestsPanel({
                 <th style={{ padding: "var(--space-md) var(--space-md)", fontWeight: "var(--font-semibold)", fontSize: "var(--text-xs)", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--neutral-600)" }}>Request</th>
                 <th style={{ padding: "var(--space-md) var(--space-md)", fontWeight: "var(--font-semibold)", fontSize: "var(--text-xs)", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--neutral-600)" }}>Status</th>
                 <th style={{ padding: "var(--space-md) var(--space-md)", fontWeight: "var(--font-semibold)", fontSize: "var(--text-xs)", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--neutral-600)" }}>Participants</th>
-                <th style={{ padding: "var(--space-md) var(--space-md)", fontWeight: "var(--font-semibold)", fontSize: "var(--text-xs)", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--neutral-600)" }}>Expires</th>
-                <th style={{ padding: "var(--space-md) var(--space-md)", fontWeight: "var(--font-semibold)", fontSize: "var(--text-xs)", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--neutral-600)" }}>Created</th>
+                {showExpiresColumn ? (
+                  <th style={{ padding: "var(--space-md) var(--space-md)", fontWeight: "var(--font-semibold)", fontSize: "var(--text-xs)", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--neutral-600)" }}>Expires</th>
+                ) : null}
+                {showCreatedColumn ? (
+                  <th style={{ padding: "var(--space-md) var(--space-md)", fontWeight: "var(--font-semibold)", fontSize: "var(--text-xs)", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--neutral-600)" }}>Created</th>
+                ) : null}
               </tr>
             </thead>
             <tbody>
@@ -1112,12 +1123,16 @@ function ActiveSigningRequestsPanel({
                       <span style={{ color: "var(--neutral-400)" }}>—</span>
                     )}
                   </td>
-                  <td style={{ padding: "var(--space-md)", verticalAlign: "top", fontSize: "var(--text-sm)", color: "var(--neutral-700)" }}>
-                    {formatDate(request.autoExpireAt)}
-                  </td>
-                  <td style={{ padding: "var(--space-md)", verticalAlign: "top", fontSize: "var(--text-sm)", color: "var(--neutral-700)" }}>
-                    {formatDate(request.createdAt)}
-                  </td>
+                  {showExpiresColumn ? (
+                    <td style={{ padding: "var(--space-md)", verticalAlign: "top", fontSize: "var(--text-sm)", color: "var(--neutral-700)" }}>
+                      {formatDate(request.autoExpireAt)}
+                    </td>
+                  ) : null}
+                  {showCreatedColumn ? (
+                    <td style={{ padding: "var(--space-md)", verticalAlign: "top", fontSize: "var(--text-sm)", color: "var(--neutral-700)" }}>
+                      {formatDate(request.createdAt)}
+                    </td>
+                  ) : null}
                 </tr>
               ))}
             </tbody>
@@ -1443,9 +1458,9 @@ function BoxSignActions() {
       }
       
       const fileId = params.fileId ? String(params.fileId).trim() : "";
-      if (!fileId) throw new Error("fileId is required.");
+      if (!fileId) return "I still need the file ID before preparing the request.";
       if (!participants.length)
-        throw new Error("Specify who is involved: participants or approverEmails/signerEmails.");
+        return "I still need participants before preparing the request. Please provide signer/approver emails.";
       const gateKey = buildSecurityGateKey(fileId, participants);
       const fileGateKey = buildSecurityGateFileKey(fileId);
       const currentGate = securityGateRef.current.get(gateKey) ?? securityGateRef.current.get(fileGateKey);
@@ -1479,15 +1494,21 @@ function BoxSignActions() {
       if (missingSecurityDetails) {
         return missingSecurityDetails;
       }
-      const { fileName, requestSummary } = await stagePreviewAndDetails(
-        params as Record<string, unknown>,
-        participantsWithDecisionFallback
-      );
-      pendingCreateSignatureRef.current = buildCreateSignature(
-        params as Record<string, unknown>,
-        participantsWithDecisionFallback
-      );
-      return `I've prepared the signature request. The document **${fileName}** is shown in the preview panel next to this chat, with the request details below it. Please review and confirm: **Is this the correct document to sign?** Reply **Yes** or **Confirm** to send the signature request; I will then create it with the same parameters (${participants.length} participant(s), ${requestSummary.isSequential ? "sequential signing" : "any order"}${requestSummary.daysValid ? `, expires in ${requestSummary.daysValid} days` : ""}${requestSummary.areRemindersEnabled ? ", reminders enabled" : ""}).`;
+      try {
+        const { fileName, requestSummary } = await stagePreviewAndDetails(
+          params as Record<string, unknown>,
+          participantsWithDecisionFallback
+        );
+        pendingCreateSignatureRef.current = buildCreateSignature(
+          params as Record<string, unknown>,
+          participantsWithDecisionFallback
+        );
+        return `I've prepared the signature request. The document **${fileName}** is shown in the preview panel next to this chat, with the request details below it. Please review and confirm: **Is this the correct document to sign?** Reply **Yes** or **Confirm** to send the signature request; I will then create it with the same parameters (${participants.length} participant(s), ${requestSummary.isSequential ? "sequential signing" : "any order"}${requestSummary.daysValid ? `, expires in ${requestSummary.daysValid} days` : ""}${requestSummary.areRemindersEnabled ? ", reminders enabled" : ""}).`;
+      } catch (error) {
+        return error instanceof Error
+          ? error.message
+          : "I couldn't prepare the preview right now. Please try again.";
+      }
     },
   });
 
@@ -1600,11 +1621,9 @@ function BoxSignActions() {
       const finalCopyReaderEmails = Array.isArray(params.finalCopyReaderEmails) ? params.finalCopyReaderEmails.map((e) => String(e).trim()).filter(Boolean) : params.finalCopyReaderEmails != null ? [String(params.finalCopyReaderEmails).trim()].filter(Boolean) : [];
       const hasRoleLists = approverEmails.length > 0 || signerEmails.length > 0 || finalCopyReaderEmails.length > 0;
       if (!fileId)
-        throw new Error("fileId is required.");
+        return "I still need the file ID before creating the request.";
       if (!participants.length)
-        throw new Error(
-          "Specify who is involved: use participants (array of { email, role }), or approverEmails and signerEmails, e.g. approverEmails: ['legal@company.com'], signerEmails: ['manager@company.com']."
-        );
+        return "I still need participants before creating the request. Please provide signer/approver emails.";
       const normalizedFileId = String(fileId).trim();
       const gateKey = buildSecurityGateKey(normalizedFileId, participants);
       const fileGateKey = buildSecurityGateFileKey(normalizedFileId);
@@ -1646,12 +1665,18 @@ function BoxSignActions() {
         participantsWithDecisionFallback
       );
       if (pendingCreateSignatureRef.current !== currentSignature) {
-        const { fileName, requestSummary } = await stagePreviewAndDetails(
-          params as Record<string, unknown>,
-          participantsWithDecisionFallback
-        );
-        pendingCreateSignatureRef.current = currentSignature;
-        return `Before sending, I must show the document preview and signing details. I have displayed **${fileName}** with all request details on screen. Please review and confirm in chat ("Yes" or "Confirm"), then ask me to send this exact request. Details: ${participantsWithDecisionFallback.length} participant(s), ${requestSummary.isSequential ? "sequential signing" : "any order"}${requestSummary.daysValid ? `, expires in ${requestSummary.daysValid} days` : ""}${requestSummary.areRemindersEnabled ? ", reminders enabled" : ""}.`;
+        try {
+          const { fileName, requestSummary } = await stagePreviewAndDetails(
+            params as Record<string, unknown>,
+            participantsWithDecisionFallback
+          );
+          pendingCreateSignatureRef.current = currentSignature;
+          return `Before sending, I must show the document preview and signing details. I have displayed **${fileName}** with all request details on screen. Please review and confirm in chat ("Yes" or "Confirm"), then ask me to send this exact request. Details: ${participantsWithDecisionFallback.length} participant(s), ${requestSummary.isSequential ? "sequential signing" : "any order"}${requestSummary.daysValid ? `, expires in ${requestSummary.daysValid} days` : ""}${requestSummary.areRemindersEnabled ? ", reminders enabled" : ""}.`;
+        } catch (error) {
+          return error instanceof Error
+            ? error.message
+            : "I couldn't prepare the preview right now. Please try again.";
+        }
       }
 
       const payload: Record<string, unknown> = {
